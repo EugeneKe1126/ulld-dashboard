@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+data/*.db
+data/*.sqlite
+data/*.db-shm
+data/*.db-wal
+.idea/
+.vscode/
+*.log
