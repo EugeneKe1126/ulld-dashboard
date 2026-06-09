@@ -1,0 +1,28 @@
+name: Supabase keep-alive
+
+# 每天對 Supabase 寫入一筆，避免免費版閒置 7 天被自動暫停。
+# 失敗時 GitHub 會自動寄 email 給 repo owner（需在 GitHub 通知設定開啟 Actions 失敗通知）。
+
+on:
+  schedule:
+    - cron: "0 21 * * *"   # 每天 UTC 21:00 = 台北時間 05:00
+  workflow_dispatch: {}      # 允許在 Actions 頁面手動按按鈕觸發（用來測試）
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install "sqlalchemy>=2" psycopg2-binary
+
+      - name: Ping Supabase
+        env:
+          ULLD_DATABASE_URL: ${{ secrets.ULLD_DATABASE_URL }}
+          ASSET_DATABASE_URL: ${{ secrets.ASSET_DATABASE_URL }}
+        run: python scripts/keepalive.py
