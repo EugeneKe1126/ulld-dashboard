@@ -140,11 +140,21 @@ SCHEMA_POSTGRES = [
 
 
 def init_db():
-    """初始化資料庫（若不存在則建立）"""
+    """初始化資料庫（若不存在則建立）。
+
+    連線自癒：上一輪匯入若把連線弄死（例如長交易被 Supabase 掐斷），
+    池裡會殘留壞連線導致這裡丟 OperationalError — dispose 掉整個池重試一次。
+    """
     statements = SCHEMA_POSTGRES if IS_POSTGRES else SCHEMA_SQLITE
-    with get_conn() as conn:
-        for stmt in statements:
-            conn.execute(text(stmt))
+    try:
+        with get_conn() as conn:
+            for stmt in statements:
+                conn.execute(text(stmt))
+    except Exception:
+        get_engine().dispose()
+        with get_conn() as conn:
+            for stmt in statements:
+                conn.execute(text(stmt))
 
 
 LOT_COLS = [
@@ -160,52 +170,62 @@ def _q(col: str) -> str:
 
 
 def upsert_lots_and_defects(lots_df: pd.DataFrame, defects_df: pd.DataFrame, source_file: str = ""):
-    """批量寫入。存在則覆蓋。回傳 (新增數, 更新數)"""
+    """批量寫入。存在則覆蓋。回傳 (新增數, 更新數)
+
+    效能關鍵：一定要用「多列 VALUES 一次 INSERT」。原版用 executemany（text() SQL），
+    psycopg2 底下=每列一趟網路來回；十萬列 × Streamlit Cloud↔Supabase 延遲=十幾分鐘，
+    交易撐太久被掐斷、整頁當掉（2026-07-21 W23~W29 匯入實際炸過）。
+    改批次多列後全程 ~160 個 statement，秒級完成。
+    覆蓋邏輯用 ON CONFLICT DO UPDATE（PostgreSQL 與 SQLite 3.24+ 語法相同）。
+    """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lots_df = lots_df.copy()
     lots_df["上傳時間"] = now
     lots_df["來源檔案"] = source_file
     lots_df["RUNCARD"] = lots_df["RUNCARD"].astype(str)
     lots_df["製程編號"] = lots_df["製程編號"].astype(str)
+    # 同一次上傳內同 key 出現多次會讓 ON CONFLICT 報錯（cannot affect row a second time）→ 留最後一筆
+    lots_df = lots_df.drop_duplicates(subset=["RUNCARD", "製程編號"], keep="last")
 
     col_names = ", ".join(_q(c) for c in LOT_COLS)
-    insert_placeholders = ", ".join(f":{c}" for c in LOT_COLS)
-    set_clause = ", ".join(f"{_q(c)} = :{c}" for c in LOT_COLS)
+    non_key_cols = [c for c in LOT_COLS if c not in ("RUNCARD", "製程編號")]
+    update_set = ", ".join(f"{_q(c)} = excluded.{_q(c)}" for c in non_key_cols)
+
+    # 先把每列轉成純 Python 值（NaN→None、numpy→原生）
+    all_values = []
+    for _, row in lots_df.iterrows():
+        values = {c: row.get(c) for c in LOT_COLS}
+        for k, v in list(values.items()):
+            if pd.isna(v):
+                values[k] = None
+            elif hasattr(v, "item"):
+                values[k] = v.item()
+        all_values.append(values)
 
     with get_conn() as conn:
-        # 1. 建立 (RUNCARD, 製程編號) → existing_id 快取
-        rows = conn.execute(text(
-            f'SELECT id, {_q("RUNCARD")}, {_q("製程編號")} FROM lots'
-        )).fetchall()
-        existing_map = {(r[1], r[2]): r[0] for r in rows}
+        before_cnt = conn.execute(text("SELECT COUNT(*) FROM lots")).scalar()
 
-        # 2. 分離 insert / update
-        to_insert, to_update = [], []
-        for _, row in lots_df.iterrows():
-            key = (row["RUNCARD"], row["製程編號"])
-            values = {c: row.get(c) for c in LOT_COLS}
-            # 把 NaN/numpy 型別轉成純 Python
-            for k, v in list(values.items()):
-                if pd.isna(v):
-                    values[k] = None
-                elif hasattr(v, "item"):
-                    values[k] = v.item()
-            if key in existing_map:
-                values["_id"] = existing_map[key]
-                to_update.append(values)
-            else:
-                to_insert.append(values)
+        # 1+2. 批次多列 upsert（500 列/句 → 19 欄 × 500 = 9,500 個參數，遠低於上限）
+        BATCH_LOTS = 500
+        for i in range(0, len(all_values), BATCH_LOTS):
+            batch = all_values[i : i + BATCH_LOTS]
+            tuples, params = [], {}
+            for j, vals in enumerate(batch):
+                names = [f"p{j}_{k}" for k in range(len(LOT_COLS))]
+                tuples.append("(" + ", ".join(f":{n}" for n in names) + ")")
+                for n, c in zip(names, LOT_COLS):
+                    params[n] = vals[c]
+            conn.execute(
+                text(
+                    f"INSERT INTO lots ({col_names}) VALUES {', '.join(tuples)} "
+                    f'ON CONFLICT ({_q("RUNCARD")}, {_q("製程編號")}) DO UPDATE SET {update_set}'
+                ),
+                params,
+            )
 
-        if to_insert:
-            conn.execute(
-                text(f"INSERT INTO lots ({col_names}) VALUES ({insert_placeholders})"),
-                to_insert,
-            )
-        if to_update:
-            conn.execute(
-                text(f"UPDATE lots SET {set_clause} WHERE id = :_id"),
-                to_update,
-            )
+        after_cnt = conn.execute(text("SELECT COUNT(*) FROM lots")).scalar()
+        inserted = after_cnt - before_cnt
+        updated = len(all_values) - inserted
 
         # 3. 查全部目標 key 的 id（含剛 insert 的）
         all_keys = list(set(zip(lots_df["RUNCARD"].tolist(), lots_df["製程編號"].tolist())))
@@ -248,29 +268,32 @@ def upsert_lots_and_defects(lots_df: pd.DataFrame, defects_df: pd.DataFrame, sou
             d["lot_id"] = d["lot_id"].map(id_map)
             d = d.dropna(subset=["lot_id"])
             if not d.empty:
-                rows_params = [
-                    {
-                        "lot_id": int(lid),
-                        "缺點碼": code,
-                        "缺點中文名": name,
-                        "缺點數": int(qty),
-                    }
-                    for lid, code, name, qty in zip(
-                        d["lot_id"].astype(int).tolist(),
-                        d["缺點碼"].tolist(),
-                        d["缺點中文名"].tolist(),
-                        d["缺點數"].astype(int).tolist(),
+                rows_params = list(zip(
+                    d["lot_id"].astype(int).tolist(),
+                    d["缺點碼"].tolist(),
+                    d["缺點中文名"].tolist(),
+                    d["缺點數"].astype(int).tolist(),
+                ))
+                # 批次多列 INSERT（1000 列/句 × 4 參數；同上，executemany 會逐列來回）
+                BATCH_DEF = 1000
+                for i in range(0, len(rows_params), BATCH_DEF):
+                    batch = rows_params[i : i + BATCH_DEF]
+                    tuples, params = [], {}
+                    for j, (lid, code, name, qty) in enumerate(batch):
+                        tuples.append(f"(:l{j}, :c{j}, :n{j}, :q{j})")
+                        params[f"l{j}"] = int(lid)
+                        params[f"c{j}"] = code
+                        params[f"n{j}"] = name
+                        params[f"q{j}"] = int(qty)
+                    conn.execute(
+                        text(
+                            f'INSERT INTO defects (lot_id, {_q("缺點碼")}, {_q("缺點中文名")}, {_q("缺點數")}) '
+                            f"VALUES {', '.join(tuples)}"
+                        ),
+                        params,
                     )
-                ]
-                conn.execute(
-                    text(
-                        f'INSERT INTO defects (lot_id, {_q("缺點碼")}, {_q("缺點中文名")}, {_q("缺點數")}) '
-                        f"VALUES (:lot_id, :缺點碼, :缺點中文名, :缺點數)"
-                    ),
-                    rows_params,
-                )
 
-        return len(to_insert), len(to_update)
+        return inserted, updated
 
 
 def log_import(檔名: str, 狀態: str, 訊息: str = ""):
