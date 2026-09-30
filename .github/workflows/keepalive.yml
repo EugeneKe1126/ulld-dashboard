@@ -2,11 +2,18 @@ name: Supabase keep-alive
 
 # 每天對 Supabase 寫入一筆，避免免費版閒置 7 天被自動暫停。
 # 失敗時 GitHub 會自動寄 email 給 repo owner（需在 GitHub 通知設定開啟 Actions 失敗通知）。
+#
+# 2026-09-30 補：GitHub 會在公開 repo「60 天沒有 commit」後自動停用排程（disabled_inactivity），而且不寄信。
+# 2026-07-21 最後一次 commit → 09-19 排程被停 → 09-27 Supabase 暫停。所以最後一步每個月自己留一個 heartbeat commit，
+# 讓 repo 永遠有活動。permissions.contents=write 是給這個 push 用的。
 
 on:
   schedule:
     - cron: "0 21 * * *"   # 每天 UTC 21:00 = 台北時間 05:00
   workflow_dispatch: {}      # 允許在 Actions 頁面手動按按鈕觸發（用來測試）
+
+permissions:
+  contents: write
 
 jobs:
   ping:
@@ -26,3 +33,19 @@ jobs:
           ULLD_DATABASE_URL: ${{ secrets.ULLD_DATABASE_URL }}
           ASSET_DATABASE_URL: ${{ secrets.ASSET_DATABASE_URL }}
         run: python scripts/keepalive.py
+
+      - name: Monthly heartbeat commit (keeps the schedule from being disabled after 60 idle days)
+        if: success()
+        run: |
+          stamp=$(date -u +%Y-%m)
+          if [ "$(cat scripts/.keepalive-heartbeat 2>/dev/null)" != "$stamp" ]; then
+            echo "$stamp" > scripts/.keepalive-heartbeat
+            git config user.name "keepalive-bot"
+            git config user.email "keepalive-bot@users.noreply.github.com"
+            git add scripts/.keepalive-heartbeat
+            git commit -m "keepalive heartbeat $stamp"
+            git push
+            echo "heartbeat committed for $stamp"
+          else
+            echo "heartbeat for $stamp already present, skip"
+          fi
