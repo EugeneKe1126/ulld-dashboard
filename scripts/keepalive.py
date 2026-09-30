@@ -13,6 +13,10 @@
 import os
 import sys
 
+for _s in (sys.stdout, sys.stderr):   # Windows 主控台 cp950/cp1252 印中文會炸
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
+
 # 顯示名 → (Postgres 連線字串 env, (REST URL env, service key env))
 PROJECTS = {
     "ulld": ("ULLD_DATABASE_URL", ("ULLD_SUPABASE_URL", "ULLD_SUPABASE_SERVICE_KEY")),
