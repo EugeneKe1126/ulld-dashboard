@@ -26,12 +26,15 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps
-        run: pip install "sqlalchemy>=2,<2.1" psycopg2-binary
+        run: pip install "sqlalchemy>=2,<2.1" psycopg2-binary requests
 
       - name: Ping Supabase
         env:
           ULLD_DATABASE_URL: ${{ secrets.ULLD_DATABASE_URL }}
           ASSET_DATABASE_URL: ${{ secrets.ASSET_DATABASE_URL }}
+          # asset-mgmt 走 REST + service key（不需要 DB 密碼），2026-09-30 加
+          ASSET_MGMT_SUPABASE_URL: ${{ secrets.ASSET_MGMT_SUPABASE_URL }}
+          ASSET_MGMT_SUPABASE_SERVICE_KEY: ${{ secrets.ASSET_MGMT_SUPABASE_SERVICE_KEY }}
         run: python scripts/keepalive.py
 
       - name: Monthly heartbeat commit (keeps the schedule from being disabled after 60 idle days)
