@@ -26,7 +26,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps
-        run: pip install "sqlalchemy>=2" psycopg2-binary
+        run: pip install "sqlalchemy>=2,<2.1" psycopg2-binary
 
       - name: Ping Supabase
         env:

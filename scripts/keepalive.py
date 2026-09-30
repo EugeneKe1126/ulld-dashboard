@@ -27,6 +27,8 @@ TRIM_SQL = text(
 def ping(url: str) -> None:
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
+    if url.startswith("postgresql://"):   # 明確用 psycopg2；SQLAlchemy 2.1 預設改 psycopg 3
+        url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
     engine = create_engine(url, pool_pre_ping=True)
     try:
         with engine.begin() as conn:

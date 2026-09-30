@@ -33,6 +33,9 @@ DATABASE_URL = _get_database_url()
 # postgres:// → postgresql://（SQLAlchemy 要求）
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# 明確指定 psycopg2 驅動：SQLAlchemy 2.1 起 postgresql:// 預設改用 psycopg 3，沒裝就 ModuleNotFoundError（2026-09-30 踩到）
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 IS_POSTGRES = DATABASE_URL.startswith("postgresql")
 
